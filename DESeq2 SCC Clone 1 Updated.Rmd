@@ -1,0 +1,239 @@
+---
+title: "DESeq2 Pipeline"
+output: html_document
+date: "2024-12-24"
+---
+
+```{r}
+# Load packages
+library("DESeq2")
+library("readr")
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library(ggplot2)
+library(pheatmap)
+library(clusterProfiler)
+```
+
+```{r}
+# Import count matrix and metadata
+cts <- read_tsv('/Users/elenajochum/Desktop/Research/Izumchenko Lab/Honors Thesis/SCC Clone 1/count_scc_human_AS.tsv')
+cts<- as.data.frame(cts)
+rownames(cts) <- cts[,1]
+cts <- cts[,-1]
+coldata <- read.csv('/Users/elenajochum/Desktop/Research/Izumchenko Lab/Honors Thesis/SCC Clone 1/Metadata_scc_human.csv', row.names=1)
+```
+
+```{r}
+# Change Ensembl ID to gene name
+cts <- as.matrix(cts) # convert cts to matrix to allow duplicate row names
+gene_names <- mapIds(org.Hs.eg.db,keys=row.names(cts),column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+rownames(cts) <- gene_names
+
+duplicate_rows <- duplicated(rownames(cts))
+cts <- cts[!duplicate_rows, ]
+cts <- as.data.frame(cts) # convert cts back to dataframe for further analysis
+cts <- cts[!(is.na(row.names(cts))),] # Remove row if gene name is "na"
+```
+
+```{r}
+#Check that the rownames of design and column names of counts match
+all(rownames(coldata) %in% colnames(cts))
+all(rownames(coldata) == colnames(cts))
+# make sure that their order is the same. Proceed only when the two statements return TRUE.
+```
+
+```{r}
+# Construct DESeqDataSet
+coldata$Condition <- factor(coldata$Condition)
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ Condition)
+```
+
+```{r}
+# PCA Plot
+vsd <- vst(dds, blind=FALSE)
+rld <- rlog(dds, blind=FALSE)
+head(assay(vsd), 3)
+pca <- plotPCA(vsd, intgroup=c("Condition"))
+nudge <- position_nudge(y = 2, x = -4)
+pca + geom_label(aes(label = name), position = nudge)
+```
+
+```{r}
+# REMOVE TWO SAMPLES THAT DO NOT CLUSTER IN PCA PLOT
+# Remove L24
+coldata <- coldata[-3,]
+cts <- cts[,-3]
+
+# Remove L27
+coldata <- coldata[-5,]
+cts <- cts[,-5]
+```
+
+```{r}
+# Construct DESeqDataSet without outliers
+coldata$Condition <- factor(coldata$Condition)
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ Condition)
+```
+
+```{r}
+# Pre-filtering
+smallestGroupSize <- 2 # change based on number of samples in each group
+keep <- rowSums(counts(dds) >= 10) >= smallestGroupSize # filters so that minimum number of counts is 10
+dds <- dds[keep,]
+```
+
+```{r}
+# Normalization
+# Note: read more about normalization at https://hbctraining.github.io/DGE_workshop/lessons/02_DGE_count_normalization.html
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)
+normalized_counts <- counts(dds, normalized=TRUE)
+#write.csv(normalized_counts,file=paste0(path,"deseq_normalized_counts.csv"),sep=",",quote=F,row.names = T) # write normalized counts to csv file
+```
+
+```{r}
+# Set reference level
+levels(dds$Condition) # shows factor level names
+dds$Condition <- relevel(dds$Condition, ref = "Control")
+```
+
+```{r}
+# Perform differential expression analysis: Clone 1 vs Control
+dds <- DESeq(dds)
+resultsNames(dds) # see comparison names to change below
+res <- results(dds)
+res_clone1vsControl <- results(dds, name="Condition_clone1_vs_Control", alpha=0.05) # alpha is p-value
+
+# Change ENSG IDs to gene symbol
+res_clone1vsControl$symbol <- mapIds(org.Hs.eg.db,keys=row.names(res_clone1vsControl),column="SYMBOL", keytype="SYMBOL", multiVals="first")
+res_clone1vsControl <- as.data.frame(res_clone1vsControl)
+res_clone1vsControl <- res_clone1vsControl[,c(7, 1, 2, 3, 4, 5, 6)]
+write.csv(as.data.frame(res_clone1vsControl), file="results_clone1_vs_control.csv") # write results to csv
+```
+
+```{r}
+# PCA plot with outliers removed
+vsd <- vst(dds, blind=FALSE)
+rld <- rlog(dds, blind=FALSE)
+head(assay(vsd), 3)
+pca <- plotPCA(vsd, intgroup=c("Condition"))
+nudge <- position_nudge(y = 1, x = -2)
+pca + geom_label(aes(label = name), position = nudge)
+```
+
+```{r}
+# Look at differential expression analysis results by padj and LFC
+res <- res_clone1vsControl # change this depending on which comparison we want to look at from above
+resOrdered <- res[order(res$pvalue),]
+summary(res)
+
+#DEGS
+upregulated <- resOrdered[which(resOrdered$padj <= 0.05 & resOrdered$log2FoldChange > 0), ]
+downregulated <- resOrdered[which(resOrdered$padj <= 0.05 & resOrdered$log2FoldChange < 0), ]
+# Can play with log2FoldChange cutoff, see how it changes if set to 1 instead of 0
+```
+
+```{r}
+# Heatmap of 100 most upregulated genes
+# Order DEGs from highest |LFC| to lowest and take top 100
+up_100 <- upregulated[order(upregulated$log2FoldChange, decreasing = TRUE), ]
+up_100 <- head(up_100, 100)
+up_100_genes <- rownames(up_100)
+up_100_cts <- normalized_counts[rownames(normalized_counts) %in% up_100_genes, ] # subset normalized counts based on row name
+sc_1 <-t(scale(t(up_100_cts), center = TRUE, scale = TRUE)) # scale counts to -1 to 1 range
+
+pheatmap(sc_1, cellheight=10, cellwidth = 10, filename = 'SCC_Clone1_vs_Ctrl_up_heatmap.png')
+```
+
+```{r}
+# Heatmap of 100 most downregulated genes
+# Order DEGs from highest |LFC| to lowest and take top 100
+down_100 <- downregulated[order(downregulated$log2FoldChange, decreasing = FALSE), ]
+down_100 <- head(down_100, 100)
+down_100_genes <- rownames(down_100)
+down_100_cts <- normalized_counts[rownames(normalized_counts) %in% down_100_genes, ] # subset normalized counts based on row name
+sc_1_down <-t(scale(t(down_100_cts), center = TRUE, scale = TRUE)) # scale counts to -1 to 1 range
+
+pheatmap(sc_1_down, cellheight=10, cellwidth = 10, filename = 'SCC_Clone1_vs_Ctrl_down_heatmap.png')
+```
+
+```{r}
+# Heatmap with significant genes of interest
+degs <- rbind(upregulated, downregulated)
+write_csv(degs, '/Users/elenajochum/Desktop/Research/Izumchenko Lab/Honors Thesis/SCC Clone 1/SCC_Clone1_degs.csv')
+sel_genes <- c('PDCD10', 'TP53',"KLF4", "MYC", "SALL4", "SOX2", "OCT4", "NANOG", "CDH1", "VIM", "CDH2", "FN1", 'SNAIL1', 'TWIST1', 'ZEB1', 'ZEB2', 'AXL', 'RAB25', "PI3K", "AKT", "CASP9", "BAD", 'MTOR', 'FKHR', 'GRB2', 'SOS', 'RAS', 'RAF', 'MEK', 'ERK1', 'ERK2', 'PKC', 'ENOS', 'FAK', 'PXN', 'PLCG1', 'WWC3', 'MST1', 'MST2', 'MAP4K', 'WWC1', 'WWC2', 'LATS1', 'LATS2', 'YAP', 'LRIG1', 'AKT3', 'IL24', 'PIK3CD', 'MYBL2', 'NGFR')
+sel_genes <- sel_genes[sel_genes %in% rownames(degs)]
+sel_cts <- normalized_counts[rownames(normalized_counts) %in% sel_genes, ]
+sc_1_sel <-t(scale(t(sel_cts), center = TRUE, scale = TRUE)) # scale counts to -1 to 1 range
+
+pheatmap(sc_1_sel, cellheight=10, cellwidth = 10, filename = 'SCC_Clone1_vs_Ctrl_heatmap.png')
+```
+
+```{r}
+# Heatmap of stemness genes
+stem_genes <- c("KLF4", "MYC", "SALL4", "SOX2", "OCT4", "NANOG")
+stem_cts <- normalized_counts[rownames(normalized_counts) %in% stem_genes, ]
+sc_1_stem <-t(scale(t(stem_cts), center = TRUE, scale = TRUE)) # scale counts to -1 to 1 range
+
+pheatmap(sc_1_stem, cellheight=10, cellwidth = 10, filename = 'SCC_Clone1_vs_Ctrl_stemness_heatmap.png')
+```
+
+```{r}
+# Heatmap of EMT genes
+EMT_genes <- c("CHD1", "VIM", "CDH2", "FN1", 'SNAIL1', 'TWIST1', 'ZEB1', 'ZEB2', 'AXL', 'RAB25')
+EMT_cts <- normalized_counts[rownames(normalized_counts) %in% EMT_genes, ]
+sc_1_EMT <-t(scale(t(EMT_cts), center = TRUE, scale = TRUE)) # scale counts to -1 to 1 range
+
+pheatmap(sc_1_EMT, cellheight=10, cellwidth = 10, filename = 'SCC_Clone1_vs_Ctrl_EMT_heatmap.png')
+```
+
+```{r}
+# Heatmap of VEGFR2 genes
+VEGFR2_genes <- c("PI3K", "AKT", "CASP9", "BAD", 'MTOR', 'FKHR', 'GRB2', 'SOS', 'RAS', 'RAF', 'MEK', 'ERK1', 'ERK2', 'PKC', 'ENOS', 'FAK', 'PXN', 'PLCG1')
+VEGFR2_cts <- normalized_counts[rownames(normalized_counts) %in% VEGFR2_genes, ]
+sc_1_VEGFR2 <-t(scale(t(VEGFR2_cts), center = TRUE, scale = TRUE)) # scale counts to -1 to 1 range
+
+pheatmap(sc_1_VEGFR2, cellheight=10, cellwidth = 10, filename = 'SCC_Clone1_vs_Ctrl_VEGFR2_heatmap.png')
+```
+
+```{r}
+# Heatmap of Hippo signaling genes
+hippo_genes <- c('WWC3', 'MST1', 'MST2', 'MAP4K', 'WWC1', 'WWC2', 'LATS1', 'LATS2', 'YAP')
+hippo_cts <- normalized_counts[rownames(normalized_counts) %in% hippo_genes, ]
+sc_1_hippo <-t(scale(t(hippo_cts), center = TRUE, scale = TRUE)) # scale counts to -1 to 1 range
+
+pheatmap(sc_1_hippo, cellheight=10, cellwidth = 10, filename = 'SCC_Clone1_vs_Ctrl_Hippo_heatmap.png')
+```
+
+```{r}
+# Plot counts for a specific gene
+plotCounts(dds, gene=which.min(res$padj), intgroup="Condition") # look at gene with smallest p-value
+plotCounts(dds, gene='Pdcd10', intgroup="Condition")
+```
+
+```{r}
+# ClusterProfiler upregulated
+keytypes(org.Hs.eg.db)
+res_up_genes <-rownames(upregulated)
+res_up_go <- enrichGO(res_up_genes,OrgDb=org.Hs.eg.db,ont="BP",keyType='SYMBOL',qvalueCutoff=0.05)
+res_up_go
+pdf("GO_up_clone1_vs_control.pdf")
+dotplot(res_up_go,showCategory=20)
+write.csv(as.data.frame(res_up_go),file = "Clone1vsControl _GO_upregulated.csv",row.names = F,quote = F,sep = ',')
+```
+
+```{r}
+# ClusterProfiler downregulated
+keytypes(org.Hs.eg.db)
+res_down_genes <-rownames(downregulated)
+res_down_go <- enrichGO(res_down_genes,OrgDb=org.Hs.eg.db,ont="BP",keyType='SYMBOL',qvalueCutoff=0.05)
+res_down_go
+pdf("GO_down_clone1_vs_control.pdf")
+dotplot(res_down_go,showCategory=20)
+write.csv(as.data.frame(res_down_go),file = "Clone1vsControl _GO_downregulated.csv",row.names = F,quote = F,sep = ',')
+```
